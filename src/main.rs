@@ -35,6 +35,13 @@ impl EventHandler for Bot {
                                 .kind(CommandOptionType::String)
                                 .required(true)
                         })
+                        .create_option(|option| {
+                            option
+                                .name("quantity")
+                                .description("News quantity")
+                                .kind(CommandOptionType::String)
+                                .required(false)
+                        })
                 })
        }).await.unwrap();
     }
@@ -56,16 +63,29 @@ impl EventHandler for Bot {
             match command.data.name.as_str() {
                 "hello" => "hello".to_owned(),
                 "news" => {
-                    let argument = command
+                    let value1 = command
                         .data
                         .options
                         .iter()
                         .find(|opt| opt.name == "game")
-                        .cloned();
+                        .cloned()
+                        .unwrap()
+                        .value
+                        .unwrap();
+
+                    let value2 = command
+                        .data
+                        .options
+                        .iter()
+                        .find(|opt| opt.name == "quantity")
+                        .cloned()
+                        .unwrap()
+                        .value
+                        .unwrap();
                 
-                    let value = argument.unwrap().value.unwrap();
-                    let game = value.as_str().unwrap();
-                    let result = news::get_news(game, &self.steam_api_key, &self.client_req).await;
+                    let game = value1.as_str().unwrap();
+                    let quantity = value2.as_str().unwrap();
+                    let result = news::get_news(&self.steam_api_key, &self.client_req, game, quantity).await;
                 
                     match result {
                         Ok(appnews) => format!(
@@ -114,7 +134,7 @@ async fn serenity(
     };
 
     // Set gateway intents, which decides what events the bot will be notified about
-    let intents = GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
+    let intents = GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT | GatewayIntents::DIRECT_MESSAGES;
 
     let client = Client::builder(&token, intents)
         .event_handler(Bot {

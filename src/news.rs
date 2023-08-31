@@ -1,3 +1,4 @@
+use chrono::{DateTime, TimeZone, Utc, serde::ts_seconds};
 use reqwest::Client;
 use serde::Deserialize;
 use std::{fmt::Display, collections::HashMap};
@@ -40,7 +41,8 @@ pub struct NewsItems {
     author: String,
     contents: String,
     feedlabel: String,
-    date: i32,
+    #[serde(with = "ts_seconds")]
+    date: DateTime<Utc>,
     feedname: String,
     feed_type: i32,
     appid: i32
@@ -71,10 +73,12 @@ impl std::error::Error for CouldNotFindApp {}
 impl std::error::Error for CouldNotFindNews {}
 
 pub async fn get_app(
-    game: &str,
 	api_key: &str,
     client: &Client,
+    game: &str,
 ) -> Result<SteamApp, Box<dyn std::error::Error>> {
+    info!("Starting get_app function");
+
 	// Endpoints we will use
     const API_URL: &str = "http://api.steampowered.com/";
     const INTERFACE: &str = "ISteamApps";
@@ -83,27 +87,36 @@ pub async fn get_app(
 
     let url = format!("{}{}/{}/{}", API_URL, INTERFACE, METHOD, VERSION);
 
+    info!("API call: {:#?}", url);
+
     let response: MainAppList = client.get(url)
         .send()
         .await?
         .json()
         .await?;
 
-    let steamapp = response.applist.apps.into_iter().find(|x| x.name == game).ok_or_else(|| CouldNotFindApp {
+    let steamapp = response
+        .applist
+        .apps
+        .into_iter()
+        .find(|x| x.name.to_lowercase().contains(&game.to_lowercase()))
+        .ok_or(CouldNotFindApp {
         game: game.to_owned(),
     })?;
 
-    println!("{:#?}", steamapp);
     info!("{:#?}", steamapp);
+    info!("Ending get_app function");
 
     Ok(steamapp)
 }
 
 pub async fn get_news(
-    game: &str,
 	api_key: &str,
     client: &Client,
+    game: &str,
+    quantity: &str,
 ) -> Result<NewsItems, Box<dyn std::error::Error>> {
+    info!("Starting get_news function");
 	// Endpoints we will use
     const API_URL: &str = "http://api.steampowered.com/";
     const INTERFACE: &str = "ISteamNews";
@@ -112,9 +125,13 @@ pub async fn get_news(
     const COUNT: &str = "999";
     const MAXLENGTH: &str = "300";
 
-    let steamapp = get_app(game, api_key, client).await?;
+    let steamapp = get_app(api_key, client, game).await?;
 
-    let url = format!("{}{}/{}/{}/?appid={}&count={}&maxlength={}", API_URL, INTERFACE, METHOD, VERSION, steamapp.appid, COUNT, MAXLENGTH);
+    let count: &str = if !quantity.is_empty() { quantity } else { COUNT }; 
+
+    let url = format!("{}{}/{}/{}/?appid={}&count={}&maxlength={}", API_URL, INTERFACE, METHOD, VERSION, steamapp.appid, count, MAXLENGTH);
+
+    info!("API call: {:#?}", url);
 
 	let response: MainAppNews = client.get(url)
         .send()
@@ -122,10 +139,16 @@ pub async fn get_news(
         .json()
         .await?;
 
-    let appnews = response.appnews.newsitems.into_iter().filter(|x| x.feedname == "steam_community_announcements").next().ok_or_else(|| CouldNotFindNews{})?;
+    let appnews = response
+        .appnews
+        .newsitems
+        .into_iter()
+        .filter(|x| x.feedname.to_lowercase() == "steam_community_announcements")
+        .next()
+        .ok_or(CouldNotFindNews{})?;
 
-    println!("{:#?}", appnews);
     info!("{:#?}", appnews);
+    info!("Ending get_news function");
 
     Ok(appnews)
 }
