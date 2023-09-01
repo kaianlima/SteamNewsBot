@@ -1,8 +1,11 @@
-use chrono::{DateTime, TimeZone, Utc, serde::ts_seconds};
+use chrono::{DateTime, Utc, serde::ts_seconds};
 use reqwest::Client;
 use serde::Deserialize;
-use std::{fmt::Display, collections::HashMap};
-use tracing::info;
+use serenity::model::prelude::application_command::CommandDataOption;
+use std::fmt::Display;
+use tracing::{info, instrument};
+
+use crate::Bot;
 
 #[derive(Deserialize, Debug)]
 pub struct MainAppList {
@@ -73,7 +76,6 @@ impl std::error::Error for CouldNotFindApp {}
 impl std::error::Error for CouldNotFindNews {}
 
 pub async fn get_app(
-	api_key: &str,
     client: &Client,
     game: &str,
 ) -> Result<SteamApp, Box<dyn std::error::Error>> {
@@ -111,7 +113,6 @@ pub async fn get_app(
 }
 
 pub async fn get_news(
-	api_key: &str,
     client: &Client,
     game: &str,
     quantity: &str,
@@ -125,7 +126,7 @@ pub async fn get_news(
     const COUNT: &str = "999";
     const MAXLENGTH: &str = "300";
 
-    let steamapp = get_app(api_key, client, game).await?;
+    let steamapp = get_app(client, game).await?;
 
     let count: &str = if !quantity.is_empty() { quantity } else { COUNT }; 
 
@@ -151,4 +152,36 @@ pub async fn get_news(
     info!("Ending get_news function");
 
     Ok(appnews)
+}
+
+pub async fn run(_options: &[CommandDataOption], client_req: &Client) -> String {
+    let value1 = _options
+        .iter()
+        .find(|opt| opt.name == "game")
+        .cloned()
+        .unwrap()
+        .value
+        .unwrap();
+
+        let value2 = _options
+            .iter()
+            .find(|opt| opt.name == "quantity")
+            .cloned()
+            .unwrap()
+            .value
+            .unwrap();
+    
+        let game = value1.as_str().unwrap();
+        let quantity = value2.as_str().unwrap();
+        let result = get_news(&client_req, game, quantity).await;
+    
+        match result {
+            Ok(appnews) => format!(
+                "Title: {:#?}",
+                appnews
+            ),
+            Err(err) => {
+                format!("Err: {}", err)
+            }
+        }
 }
