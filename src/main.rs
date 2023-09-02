@@ -1,97 +1,28 @@
 mod commands;
+mod structs;
 
 use anyhow::anyhow;
-use serenity::model::prelude::command::{CommandOptionType, Command};
-use serenity::model::prelude::{Interaction, InteractionResponseType};
-use serenity::{async_trait, model::prelude::GuildId};
-use serenity::model::gateway::Ready;
-use serenity::prelude::*;
+use poise::serenity_prelude as serenity;
+use poise::serenity_prelude::{GatewayIntents, GuildId};
+use shuttle_poise::ShuttlePoise;
 use shuttle_secrets::SecretStore;
-use tracing::{debug, error, info};
-
-pub struct Bot {
-    steam_api_key: String,
-    client_req: reqwest::Client,
-	discord_guild_id: GuildId,
-}
-
-#[async_trait]
-impl EventHandler for Bot {
-    // `interaction_create` runs when the user interacts with the bot
-    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        // check if the interaction is a command
-        if let Interaction::ApplicationCommand(command) = interaction {
-            debug!("Received command interaction: {:#?}", command);
-
-            let response_content =
-                match command.data.name.as_str() {
-                    "ping" => commands::ping::run(&command.data.options),
-                    "news" => commands::news::run(&command.data.options, &self.client_req).await,
-                    command => unreachable!("Unknown command: {}", command),
-                };
-
-            if let Err(why) = command.create_interaction_response(&ctx.http, |response| {
-                    response
-                        .kind(InteractionResponseType::ChannelMessageWithSource)
-                        .interaction_response_data(|message| message.content(response_content))
-                })
-                .await
-            {
-                info!("Cannot respond to slash command: {}", why);
-            }
-        }
-    }
-
-    async fn ready(&self, ctx: Context, ready: Ready) {
-        info!("{} is connected!", ready.user.name);
-       
-        // Register guild commands
-        let commands = GuildId::set_application_commands(&self.discord_guild_id, &ctx.http, |commands| {
-            commands
-                .create_application_command(|command| { command.name("ping").description("A ping command") })
-                .create_application_command(|command| {
-                    command
-                        .name("news")
-                        .description("Display the news")
-                        .create_option(|option| {
-                            option
-                                .name("game")
-                                .description("Game to lookup news")
-                                .kind(CommandOptionType::String)
-                                .required(true)
-                        })
-                        .create_option(|option| {
-                            option
-                                .name("quantity")
-                                .description("News quantity")
-                                .kind(CommandOptionType::String)
-                                .required(false)
-                        })
-                })
-        }).await.unwrap();
-
-        /* Register global commands
-        let guild_command = Command::create_global_application_command(&ctx.http, |command| {
-            commands::global_command::register(command)
-        }).await.unwrap();
-        */
-        
-    }
-}
+use std::{sync::{Arc, Mutex}, time::Duration};
+use tracing::{error, info};
+use structs::{Context, Data, DataInner, Error};
 
 #[shuttle_runtime::main]
-async fn serenity(
+async fn poise(
     #[shuttle_secrets::Secrets] secret_store: SecretStore,
-) -> shuttle_serenity::ShuttleSerenity {
+) -> ShuttlePoise<Data, Error> {
     // Get the discord token set in `Secrets.toml`
-    let token = if let Some(token) = secret_store.get("DISCORD_TOKEN") {
+    let ds_token = if let Some(token) = secret_store.get("DISCORD_TOKEN") {
         token
     } else {
         return Err(anyhow!("'DISCORD_TOKEN' was not found").into());
     };
 
-    let steam_api_key = if let Some(steam_api_key) = secret_store.get("STEAM_API_KEY") {
-        steam_api_key
+    let steam_token = if let Some(steam_token) = secret_store.get("STEAM_API_KEY") {
+        steam_token
     } else {
         return Err(anyhow!("'STEAM_API_KEY' was not found").into());
     };
@@ -102,17 +33,85 @@ async fn serenity(
         return Err(anyhow!("'DISCORD_GUILD_ID' was not found").into());
     };
 
+    let reqwest = reqwest::Client::new();
+
+    let data = Data(Arc::new(DataInner {
+        ds_token: ds_token.clone(), steam_token, discord_guild_id, reqwest
+    }));
+
     // Set gateway intents, which decides what events the bot will be notified about
     let intents = GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT | GatewayIntents::DIRECT_MESSAGES;
 
-    let client = Client::builder(&token, intents)
-        .event_handler(Bot {
-            steam_api_key,
-            client_req: reqwest::Client::new(),
-			discord_guild_id: GuildId(discord_guild_id.parse().unwrap())
-        })
-        .await
-        .expect("Err creating client");
+    // FrameworkOptions contains all of poise's configuration option in one struct
+    // Every option can be omitted to use its default value
+    let options = poise::FrameworkOptions {
+        commands: commands::commands(),
+        prefix_options: poise::PrefixFrameworkOptions {
+            prefix: Some("!".into()),
+            edit_tracker: Some(poise::EditTracker::for_timespan(Duration::from_secs(300))),
+            ..Default::default()
+        },
+        /// The global error handler for all error cases that may occur
+        on_error: |error| {
+            Box::pin(async move {
+                match error {
+                    poise::FrameworkError::Setup { error, .. } => panic!("Failed to start bot: {:?}", error),
+                    poise::FrameworkError::Command { error, ctx } => {
+                        error!("Error in command `{}`: {:?}", ctx.command().name, error,);
+                    }
+                    poise::FrameworkError::ArgumentParse { error, .. } => {
+                        if let Some(error) = error.downcast_ref::<serenity::RoleParseError>() {
+                            error!("Found a RoleParseError: {:?}", error);
+                        } else {
+                            error!("Not a RoleParseError :(");
+                        }
+                    }
+                    other => {
+                        if let Err(e) = poise::builtins::on_error(other).await {
+                            error!("Error while handling error: {}", e)
+                        }
+                    },
+                }
+            })
+        },
+        /// This code is run before every command
+        pre_command: |ctx| {
+            Box::pin(async move {
+                println!("Executing command {}...", ctx.command().qualified_name);
+            })
+        },
+        /// This code is run after a command if it was successful (returned Ok)
+        post_command: |ctx| {
+            Box::pin(async move {
+                println!("Executed command {}!", ctx.command().qualified_name);
+            })
+        },
+        /// Every command invocation must pass this check to continue execution
+        command_check: Some(|ctx| {
+            Box::pin(async move {
+                if ctx.author().id == 123456789 {
+                    return Ok(false);
+                }
+                Ok(true)
+            })
+        }),
+        ..poise::FrameworkOptions::default()
+    };
 
-    Ok(client.into())
+    let framework = poise::Framework::builder()
+        .options(options)
+        .token(ds_token)
+        .intents(intents)
+        .setup(|ctx, _ready, framework| {
+            Box::pin(async move {
+                println!("Logged in as {}", _ready.user.name);
+                poise::builtins::register_globally(ctx, &framework.options().commands).await?;
+                Ok(data)
+            })
+        })
+        .build()
+        .await
+        .map_err(shuttle_runtime::CustomError::new)?;
+
+    Ok(framework.into())
 }

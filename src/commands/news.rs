@@ -1,11 +1,11 @@
 use chrono::{DateTime, Utc, serde::ts_seconds};
 use reqwest::Client;
 use serde::Deserialize;
-use serenity::model::prelude::application_command::CommandDataOption;
 use std::fmt::Display;
-use tracing::{info, instrument};
+use tracing::info;
 
-use crate::Bot;
+use crate::Context;
+use crate::structs::{Command, CommandResult, Error};
 
 #[derive(Deserialize, Debug)]
 pub struct MainAppList {
@@ -76,12 +76,10 @@ impl std::error::Error for CouldNotFindApp {}
 impl std::error::Error for CouldNotFindNews {}
 
 pub async fn get_app(
-    client: &Client,
-    game: &str,
-) -> Result<SteamApp, Box<dyn std::error::Error>> {
-    info!("Starting get_app function");
-
-	// Endpoints we will use
+    client: Client,
+    game: String,
+) -> Result<SteamApp, Error> {
+	// API endpoint build
     const API_URL: &str = "http://api.steampowered.com/";
     const INTERFACE: &str = "ISteamApps";
     const METHOD: &str = "GetAppList";
@@ -107,18 +105,17 @@ pub async fn get_app(
     })?;
 
     info!("{:#?}", steamapp);
-    info!("Ending get_app function");
 
     Ok(steamapp)
 }
 
-pub async fn get_news(
-    client: &Client,
-    game: &str,
-    quantity: &str,
-) -> Result<NewsItems, Box<dyn std::error::Error>> {
-    info!("Starting get_news function");
-	// Endpoints we will use
+#[poise::command(prefix_command, track_edits, slash_command)]
+pub async fn news(
+    ctx: Context<'_>, 
+    #[description = "Game to lookup news"] game: String, 
+    #[description = "News quantity"] quantity: Option<String>
+) -> CommandResult {
+	// API endpoint build
     const API_URL: &str = "http://api.steampowered.com/";
     const INTERFACE: &str = "ISteamNews";
     const METHOD: &str = "GetNewsForApp";
@@ -126,9 +123,11 @@ pub async fn get_news(
     const COUNT: &str = "999";
     const MAXLENGTH: &str = "300";
 
-    let steamapp = get_app(client, game).await?;
+    let client = ctx.data().0.reqwest.clone();
 
-    let count: &str = if !quantity.is_empty() { quantity } else { COUNT }; 
+    let steamapp = get_app(client.clone(), game).await?;
+
+    let count: &str = &quantity.unwrap_or(COUNT.to_string()); 
 
     let url = format!("{}{}/{}/{}/?appid={}&count={}&maxlength={}", API_URL, INTERFACE, METHOD, VERSION, steamapp.appid, count, MAXLENGTH);
 
@@ -149,39 +148,12 @@ pub async fn get_news(
         .ok_or(CouldNotFindNews{})?;
 
     info!("{:#?}", appnews);
-    info!("Ending get_news function");
 
-    Ok(appnews)
+    ctx.say(format!("APPNEWS: {:#?}",appnews)).await?;
+
+    Ok(())
 }
 
-pub async fn run(_options: &[CommandDataOption], client_req: &Client) -> String {
-    let value1 = _options
-        .iter()
-        .find(|opt| opt.name == "game")
-        .cloned()
-        .unwrap()
-        .value
-        .unwrap();
-
-        let value2 = _options
-            .iter()
-            .find(|opt| opt.name == "quantity")
-            .cloned()
-            .unwrap()
-            .value
-            .unwrap();
-    
-        let game = value1.as_str().unwrap();
-        let quantity = value2.as_str().unwrap();
-        let result = get_news(&client_req, game, quantity).await;
-    
-        match result {
-            Ok(appnews) => format!(
-                "Title: {:#?}",
-                appnews
-            ),
-            Err(err) => {
-                format!("Err: {}", err)
-            }
-        }
+pub fn commands() -> [Command; 1] {
+    [news()]
 }
