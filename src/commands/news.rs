@@ -1,7 +1,10 @@
 use chrono::{DateTime, Utc, serde::ts_seconds};
+use poise::CreateReply;
+use poise::serenity_prelude::{EditMessage, InteractionResponseType};
 use reqwest::Client;
 use serde::Deserialize;
 use std::fmt::Display;
+use std::time::Duration;
 use tracing::info;
 
 use crate::Context;
@@ -78,8 +81,8 @@ impl std::error::Error for CouldNotFindNews {}
 pub async fn get_app(
     client: Client,
     game: String,
-) -> Result<SteamApp, Error> {
-	// API endpoint build
+) -> Result<Vec<SteamApp>, Error> {
+	// API endpoint var
     const API_URL: &str = "http://api.steampowered.com/";
     const INTERFACE: &str = "ISteamApps";
     const METHOD: &str = "GetAppList";
@@ -99,29 +102,28 @@ pub async fn get_app(
         .applist
         .apps
         .into_iter()
-        .find(|x| x.name.to_lowercase().contains(&game.to_lowercase()))
-        .ok_or(CouldNotFindApp {
-        game: game.to_owned(),
-    })?;
+        .filter(|x| x.name.to_lowercase().contains(&game.to_lowercase()))
+        .collect::<Vec<SteamApp>>();
 
-    info!("{:#?}", steamapp);
+    info!("Apps: {:#?}", steamapp);
 
     Ok(steamapp)
 }
 
-#[poise::command(prefix_command, track_edits, slash_command)]
+#[poise::command(prefix_command, slash_command, reuse_response, track_edits)]
 pub async fn news(
     ctx: Context<'_>, 
-    #[description = "Game to lookup news"] game: String, 
-    #[description = "News quantity"] quantity: Option<String>
+    game: String, 
+    quantity: Option<String>
 ) -> CommandResult {
-	// API endpoint build
+	// API endpoint var
     const API_URL: &str = "http://api.steampowered.com/";
     const INTERFACE: &str = "ISteamNews";
     const METHOD: &str = "GetNewsForApp";
     const VERSION: &str = "v0002";
     const COUNT: &str = "999";
-    const MAXLENGTH: &str = "300";
+    const MAX_LENGTH: &str = "300";
+    const MAX_SELECT_OPTION: usize = 10;
 
     let client = ctx.data().0.reqwest.clone();
 
@@ -129,7 +131,61 @@ pub async fn news(
 
     let count: &str = &quantity.unwrap_or(COUNT.to_string()); 
 
-    let url = format!("{}{}/{}/{}/?appid={}&count={}&maxlength={}", API_URL, INTERFACE, METHOD, VERSION, steamapp.appid, count, MAXLENGTH);
+    let mut app_menu_options: Vec<poise::serenity_prelude::CreateSelectMenuOption> = Vec::new();
+    let mut apps_iterator = steamapp.iter().peekable();
+    let mut count_iter = 0;
+    while let Some(app) = apps_iterator.next() {
+        app_menu_options.push(poise::serenity_prelude::CreateSelectMenuOption::new(app.name.to_string(), app.appid.to_string()));
+        count_iter += 1;
+        if apps_iterator.peek().is_none() || count_iter == MAX_SELECT_OPTION {
+            break;
+        }
+    }
+
+    let reply = ctx.send(|builder| {
+        builder.content("Select game")
+        .ephemeral(true)
+        .components(|components| {
+            components.create_action_row(|row| {
+                row.create_select_menu(|menu| {
+                    menu.custom_id("game_select");
+                    menu.placeholder("No game selected");
+                    menu.options(|f| {
+                        f.set_options(app_menu_options)
+                    })
+                })
+
+            })
+        })
+    }).await?;
+
+    let ctx_discord = ctx.serenity_context();
+    let interaction =
+            match reply.message()
+            .await?
+            .await_component_interaction(&ctx)
+            .timeout(Duration::from_secs(60 * 3))
+            .await {
+                Some(x) => {
+                    reply.edit(ctx, |b| {
+                        b.content(format!("Game {:?} selected", x.data.values[0]))
+                    })
+                    .await
+                    .unwrap();
+                    x
+                },
+                None => {
+                    reply.delete(ctx).await?;
+                    return Ok(());
+                },
+                _ => unreachable!()
+            };
+
+    let appid = &interaction.data.values[0];
+
+    info!("Data: {:#?}",  &interaction);
+
+    let url = format!("{}{}/{}/{}/?appid={}&count={}&maxlength={}", API_URL, INTERFACE, METHOD, VERSION, appid, count, MAX_LENGTH);
 
     info!("API call: {:#?}", url);
 
@@ -143,13 +199,42 @@ pub async fn news(
         .appnews
         .newsitems
         .into_iter()
-        .filter(|x| x.feedname.to_lowercase() == "steam_community_announcements")
-        .next()
+        .find(|x| x.feedname.to_lowercase() == "steam_community_announcements")
         .ok_or(CouldNotFindNews{})?;
 
-    info!("{:#?}", appnews);
+    info!("App News: {:#?}", appnews);
 
-    ctx.say(format!("APPNEWS: {:#?}",appnews)).await?;
+    // interaction.edit(&ctx, |response| {
+    //     response.content(format!("APPNEWS: {:#?}", appnews))
+    // })
+    // .await?;
+
+    ctx.send(|builder| {
+        builder
+        .content(format!("APPNEWS: {:#?}", appnews))
+        .reply(false)
+    })
+    .await?;
+
+    //reply.delete(ctx).await.unwrap();
+
+    // let mut msg = interaction.message.clone();
+    // msg.edit(ctx, |m| m.content(format!("APPNEWS: {:#?}",appnews))).await?;
+
+    // interaction.create_interaction_response(ctx, |ir| {
+    //     ir.kind(InteractionResponseType::DeferredUpdateMessage)
+    // })
+    // .await?;
+
+    // interaction.create_interaction_response(ctx_discord, |response| {
+    //     response.kind(InteractionResponseType::UpdateMessage).interaction_response_data(|data| {
+    //         data.content(format!("APPNEWS: {:#?}",appnews)).components(|c|{c})
+    //     })
+    // })
+    // .await
+    // .unwrap();
+
+    //reply.message().await.unwrap().delete(ctx).await.unwrap();
 
     Ok(())
 }
