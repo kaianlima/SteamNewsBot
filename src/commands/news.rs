@@ -1,82 +1,10 @@
-use chrono::{DateTime, Utc, serde::ts_seconds};
-use poise::CreateReply;
-use poise::serenity_prelude::{EditMessage, InteractionResponseType};
 use reqwest::Client;
-use serde::Deserialize;
-use std::fmt::Display;
 use std::time::Duration;
 use tracing::info;
 
 use crate::Context;
-use crate::structs::{Command, CommandResult, Error};
-
-#[derive(Deserialize, Debug)]
-pub struct MainAppList {
-    pub applist: AppList,
-}
-
-#[derive(Deserialize, Debug)]
-pub struct AppList {
-    pub apps: Vec<SteamApp>,
-}
-
-#[derive(Deserialize, Debug)]
-pub struct SteamApp {
-    appid: i32,
-    name: String,
-}
-
-#[derive(Deserialize, Debug)]
-pub struct MainAppNews {
-    pub appnews: AppNews,
-}
-
-#[derive(Deserialize, Debug)]
-pub struct AppNews {
-    appid: i32,
-    pub newsitems: Vec<NewsItems>,
-    count: i32,
-}
-
-#[derive(Deserialize, Debug)]
-pub struct NewsItems {
-    gid: String,
-    pub title: String,
-    url: String,
-    is_external_url: bool,
-    author: String,
-    contents: String,
-    feedlabel: String,
-    #[serde(with = "ts_seconds")]
-    date: DateTime<Utc>,
-    feedname: String,
-    feed_type: i32,
-    appid: i32
-}
-
-#[derive(Deserialize, Debug)]
-pub struct CouldNotFindApp {
-    game: String,
-}
-
-#[derive(Deserialize, Debug)]
-pub struct CouldNotFindNews {}
-
-impl Display for CouldNotFindApp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Could not find game '{}'", self.game)
-    }
-}
-
-impl Display for CouldNotFindNews {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Could not find news")
-    }
-}
-
-impl std::error::Error for CouldNotFindApp {}
-
-impl std::error::Error for CouldNotFindNews {}
+use crate::funcs::search_in;
+use crate::structs::{Command, CommandResult, CouldNotFindApp, CouldNotFindNews, Error, MainAppList, MainAppNews, SteamApp};
 
 pub async fn get_app(
     client: Client,
@@ -105,7 +33,7 @@ pub async fn get_app(
         .filter(|x| x.name.to_lowercase().contains(&game.to_lowercase()))
         .collect::<Vec<SteamApp>>();
 
-    info!("Apps: {:#?}", steamapp);
+    //info!("Apps: {:#?}", steamapp);
 
     Ok(steamapp)
 }
@@ -116,7 +44,71 @@ pub async fn news(
     game: String, 
     quantity: Option<String>
 ) -> CommandResult {
-	// API endpoint var
+    info!("Commands parameters: {{Game: {:#?} - Quantity: {:#?}}}", &game, &quantity.clone().unwrap_or("Not provided, set to default".to_string()));
+
+    let client = ctx.data().0.reqwest.clone();
+    let steamapp: &mut Vec<SteamApp> = &mut get_app(client.clone(), game.clone()).await?;
+    let (steamapps, app_searched) = search_in(steamapp, game.clone());
+
+    //steamapp.clear();
+
+    let appid = if app_searched.is_some() {
+        app_searched.unwrap().appid.to_string()
+    } else {
+        let mut app_menu_options: Vec<poise::serenity_prelude::CreateSelectMenuOption> = Vec::new();
+        let mut apps_iterator = steamapps.iter().peekable();
+        let mut count_iter = 0;
+        while let Some(app) = apps_iterator.next() {
+            app_menu_options.push(poise::serenity_prelude::CreateSelectMenuOption::new(app.name.to_string(), app.appid.to_string()));
+            count_iter += 1;
+            if apps_iterator.peek().is_none() || count_iter == MAX_SELECT_OPTION {
+                break;
+            }
+        }
+
+        let reply = ctx.send(|builder| {
+            builder.content("Select game")
+            .ephemeral(true)
+            .components(|components| {
+                components.create_action_row(|row| {
+                    row.create_select_menu(|menu| {
+                        menu.custom_id("game_select");
+                        menu.placeholder("No game selected");
+                        menu.options(|f| {
+                            f.set_options(app_menu_options)
+                        })
+                    })
+
+                })
+            })
+        }).await?;
+
+        let interaction =
+                match reply.message()
+                .await?
+                .await_component_interaction(ctx)
+                .timeout(Duration::from_secs(60 * 3))
+                .await {
+                    Some(x) => {
+                        reply.edit(ctx, |b| {
+                            b.content(format!("Game {:?} selected", x.data.values[0]))
+                        })
+                        .await
+                        .unwrap();
+                        x
+                    },
+                    None => {
+                        reply.delete(ctx).await?;
+                        return Ok(());
+                    },
+                };
+
+        info!("Data: {:#?}", &interaction);
+
+        interaction.data.values[0].clone()
+    };
+
+    // API endpoint var
     const API_URL: &str = "http://api.steampowered.com/";
     const INTERFACE: &str = "ISteamNews";
     const METHOD: &str = "GetNewsForApp";
@@ -124,66 +116,7 @@ pub async fn news(
     const COUNT: &str = "999";
     const MAX_LENGTH: &str = "300";
     const MAX_SELECT_OPTION: usize = 10;
-
-    let client = ctx.data().0.reqwest.clone();
-
-    let steamapp = get_app(client.clone(), game).await?;
-
     let count: &str = &quantity.unwrap_or(COUNT.to_string()); 
-
-    let mut app_menu_options: Vec<poise::serenity_prelude::CreateSelectMenuOption> = Vec::new();
-    let mut apps_iterator = steamapp.iter().peekable();
-    let mut count_iter = 0;
-    while let Some(app) = apps_iterator.next() {
-        app_menu_options.push(poise::serenity_prelude::CreateSelectMenuOption::new(app.name.to_string(), app.appid.to_string()));
-        count_iter += 1;
-        if apps_iterator.peek().is_none() || count_iter == MAX_SELECT_OPTION {
-            break;
-        }
-    }
-
-    let reply = ctx.send(|builder| {
-        builder.content("Select game")
-        .ephemeral(true)
-        .components(|components| {
-            components.create_action_row(|row| {
-                row.create_select_menu(|menu| {
-                    menu.custom_id("game_select");
-                    menu.placeholder("No game selected");
-                    menu.options(|f| {
-                        f.set_options(app_menu_options)
-                    })
-                })
-
-            })
-        })
-    }).await?;
-
-    let ctx_discord = ctx.serenity_context();
-    let interaction =
-            match reply.message()
-            .await?
-            .await_component_interaction(&ctx)
-            .timeout(Duration::from_secs(60 * 3))
-            .await {
-                Some(x) => {
-                    reply.edit(ctx, |b| {
-                        b.content(format!("Game {:?} selected", x.data.values[0]))
-                    })
-                    .await
-                    .unwrap();
-                    x
-                },
-                None => {
-                    reply.delete(ctx).await?;
-                    return Ok(());
-                },
-                _ => unreachable!()
-            };
-
-    let appid = &interaction.data.values[0];
-
-    info!("Data: {:#?}",  &interaction);
 
     let url = format!("{}{}/{}/{}/?appid={}&count={}&maxlength={}", API_URL, INTERFACE, METHOD, VERSION, appid, count, MAX_LENGTH);
 

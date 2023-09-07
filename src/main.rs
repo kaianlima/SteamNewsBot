@@ -1,13 +1,14 @@
 mod commands;
+mod funcs;
 mod structs;
 
 use anyhow::anyhow;
 use poise::serenity_prelude as serenity;
-use poise::serenity_prelude::{GatewayIntents, GuildId};
+use poise::serenity_prelude::GatewayIntents;
 use shuttle_poise::ShuttlePoise;
 use shuttle_secrets::SecretStore;
-use std::{sync::{Arc, Mutex}, time::Duration};
-use tracing::{error, info};
+use std::{sync::Arc, time::Duration};
+use tracing::error;
 use structs::{Context, Data, DataInner, Error};
 
 #[shuttle_runtime::main]
