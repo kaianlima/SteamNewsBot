@@ -3,7 +3,7 @@ use std::time::Duration;
 use tracing::info;
 
 use crate::Context;
-use crate::funcs::search_in;
+use crate::funcs::{search_in, order_apps};
 use crate::structs::{Command, CommandResult, CouldNotFindApp, CouldNotFindNews, Error, MainAppList, MainAppNews, SteamApp};
 
 pub async fn get_app(
@@ -33,7 +33,7 @@ pub async fn get_app(
         .filter(|x| x.name.to_lowercase().contains(&game.to_lowercase()))
         .collect::<Vec<SteamApp>>();
 
-    //info!("Apps: {:#?}", steamapp);
+    info!("Found {:#?} apps", steamapp.len());
 
     Ok(steamapp)
 }
@@ -55,6 +55,10 @@ pub async fn news(
     let appid = if app_searched.is_some() {
         app_searched.unwrap().appid.to_string()
     } else {
+        order_apps(steamapps);
+
+        info!("Ordered Apps: {:#?}", steamapps);
+        
         let mut app_menu_options: Vec<poise::serenity_prelude::CreateSelectMenuOption> = Vec::new();
         let mut apps_iterator = steamapps.iter().peekable();
         let mut count_iter = 0;
@@ -84,26 +88,26 @@ pub async fn news(
         }).await?;
 
         let interaction =
-                match reply.message()
-                .await?
-                .await_component_interaction(ctx)
-                .timeout(Duration::from_secs(60 * 3))
-                .await {
-                    Some(x) => {
-                        reply.edit(ctx, |b| {
-                            b.content(format!("Game {:?} selected", x.data.values[0]))
-                        })
-                        .await
-                        .unwrap();
-                        x
-                    },
-                    None => {
-                        reply.delete(ctx).await?;
-                        return Ok(());
-                    },
-                };
+            match reply.message()
+            .await?
+            .await_component_interaction(ctx)
+            .timeout(Duration::from_secs(60 * 3))
+            .await {
+                Some(x) => {
+                    reply.edit(ctx, |b| {
+                        b.content(format!("Game {:?} selected", x.data.values[0]))
+                    })
+                    .await
+                    .unwrap();
+                    x
+                },
+                None => {
+                    reply.delete(ctx).await?;
+                    return Ok(());
+                },
+            };
 
-        info!("Data: {:#?}", &interaction);
+        //info!("Data: {:#?}", &interaction);
 
         interaction.data.values[0].clone()
     };

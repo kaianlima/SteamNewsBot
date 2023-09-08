@@ -39,3 +39,8 @@ pub fn search_in(apps_searched: &mut Vec<SteamApp>, text: String) -> (&mut Vec<S
     };
     search
 }
+
+// Descending ordering by search_score
+pub fn order_apps(apps: &mut Vec<SteamApp>) {
+    apps.sort_by(|a, b| b.search_score.cmp(&a.search_score));
+}
